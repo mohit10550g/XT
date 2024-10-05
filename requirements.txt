@@ -1,0 +1,6 @@
+streamlit
+pydub
+torchaudio
+torch
+TTS
+base64
