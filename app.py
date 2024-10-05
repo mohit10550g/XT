@@ -6,7 +6,6 @@ import torch
 import streamlit as st
 import torchaudio
 import base64
-import io
 import time
 from TTS.api import TTS
 
@@ -14,15 +13,8 @@ from TTS.api import TTS
 BASE_DIR = os.path.dirname(__file__)
 OUTPUT_WAV_PATH = os.path.join(BASE_DIR, 'output_wav')
 TRANSCRIPTION_PATH = os.path.join(BASE_DIR, 'transcription')
-MODEL_PATH = os.path.join(BASE_DIR, 'models', 'xtts_v2')
-FFMPEG_PATH = os.path.join(BASE_DIR, 'ffmpeg', 'bin', 'ffmpeg.exe')
 VOICE_DIR = os.path.join(BASE_DIR, 'voices')
 TOAST_DURATION = 10
-
-# Set ffmpeg path for pydub
-os.environ["PATH"] += os.pathsep + os.path.dirname(FFMPEG_PATH)
-
-from pydub import AudioSegment
 
 # Language options
 LANGUAGE_OPTIONS = {
@@ -38,15 +30,8 @@ def setup_directories():
 def load_tts_model():
     if 'tts_model' not in st.session_state:
         try:
-            config_path = os.path.join(MODEL_PATH, 'config.json')
-            model_file = os.path.join(MODEL_PATH, 'model.pth')
-            
-            for path in [config_path, model_file]:
-                if not os.path.exists(path):
-                    raise FileNotFoundError(f"{path} not found.")
-            
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            st.session_state.tts_model = TTS(model_path=MODEL_PATH, config_path=config_path).to(device)
+            st.session_state.tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
             toast("TTS model loaded successfully!", TOAST_DURATION)
         except Exception as e:
             toast(f"Error loading TTS model: {e}", TOAST_DURATION)
@@ -80,7 +65,7 @@ def clean_audio(speaker_wav, voice_cleanup):
             cleaned_audio = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()) + ".wav")
             lowpass_highpass = "lowpass=8000,highpass=75,"
             trim_silence = "areverse,silenceremove=start_periods=1:start_silence=0:start_threshold=0.02,areverse,silenceremove=start_periods=1:start_silence=0:start_threshold=0.02,"
-            shell_command = [FFMPEG_PATH, "-y", "-i", speaker_wav, "-af", f"{lowpass_highpass}{trim_silence}", cleaned_audio]
+            shell_command = ["ffmpeg", "-y", "-i", speaker_wav, "-af", f"{lowpass_highpass}{trim_silence}", cleaned_audio]
             process = subprocess.Popen(shell_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
             if process.returncode != 0:
@@ -136,7 +121,7 @@ def apply_audio_settings(input_path, output_path, audio_quality, voice_speed):
     sample_rate, bit_depth = quality_settings[audio_quality]
 
     subprocess.run([
-        FFMPEG_PATH, "-y",
+        "ffmpeg", "-y",
         "-i", input_path,
         "-af", f"atempo={tempo}",
         "-ar", str(sample_rate),
