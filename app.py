@@ -2,9 +2,12 @@ import os
 import subprocess
 import tempfile
 import uuid
+import torch
 import streamlit as st
+import torchaudio
 import base64
 import time
+from TTS.api import TTS
 
 # Constants
 BASE_DIR = os.path.dirname(__file__)
@@ -13,15 +16,47 @@ TRANSCRIPTION_PATH = os.path.join(BASE_DIR, 'transcription')
 VOICE_DIR = os.path.join(BASE_DIR, 'voices')
 TOAST_DURATION = 10
 
+# Language options
+LANGUAGE_OPTIONS = {
+    "English": "en", "Hindi": "hi", "Spanish": "es", "French": "fr",
+    "German": "de", "Italian": "it", "Russian": "ru"
+}
+
 # Setup functions
 def setup_directories():
     os.makedirs(OUTPUT_WAV_PATH, exist_ok=True)
     os.makedirs(TRANSCRIPTION_PATH, exist_ok=True)
 
+def load_tts_model():
+    if 'tts_model' not in st.session_state:
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            st.session_state.tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+            toast("TTS model loaded successfully!", TOAST_DURATION)
+        except Exception as e:
+            toast(f"Error loading TTS model: {e}", TOAST_DURATION)
+            st.stop()
+
 # Utility functions
 def toast(msg, duration):
     st.toast(msg)
     time.sleep(duration)
+
+def plot_wf(wav_path):
+    waveform, sample_rate = torchaudio.load(wav_path)
+    waveform = waveform.squeeze().numpy()
+    waveform = (waveform - waveform.min()) / (waveform.max() - waveform.min())
+    
+    width, height, padding, line_width = 800, 200, 10, 1
+    resampled = [waveform[int(i * len(waveform) / width)] for i in range(width)]
+    
+    path_data = "M" + " ".join([f"{i + padding},{int((1 - sample) * (height - 2 * padding) + padding)}" for i, sample in enumerate(resampled)])
+    
+    svg = f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg"><path d="{path_data}" fill="none" stroke="SteelBlue" stroke-width="{line_width}"/></svg>'
+    svg_bytes = svg.encode('utf-8')
+    base64_svg = base64.b64encode(svg_bytes).decode('utf-8')
+    
+    return f"data:image/svg+xml;base64,{base64_svg}"
 
 # Audio processing functions
 def clean_audio(speaker_wav, voice_cleanup):
@@ -42,7 +77,39 @@ def clean_audio(speaker_wav, voice_cleanup):
             return speaker_wav
     return speaker_wav
 
-def process_audio(input_path, output_path, audio_quality, voice_speed):
+def generate_speech(prompt, language, speaker_wav, voice_cleanup, audio_quality, voice_speed):
+    speaker_wav = clean_audio(speaker_wav, voice_cleanup)
+    
+    try:
+        wav_output = st.session_state.tts_model.tts(prompt, speaker_wav=speaker_wav, language=language)
+        wav_tensor = torch.tensor(wav_output).unsqueeze(0)
+
+        base_output_path = os.path.join(OUTPUT_WAV_PATH, "wav")
+        temp_output_path = f"{base_output_path}_temp.wav"
+        output_path = get_unique_output_path(base_output_path)
+
+        torchaudio.save(temp_output_path, wav_tensor, 24000)
+
+        apply_audio_settings(temp_output_path, output_path, audio_quality, voice_speed)
+
+        os.remove(temp_output_path)
+
+        save_transcription(prompt, output_path)
+
+        return output_path
+    except Exception as e:
+        toast(f"Error generating speech: {str(e)}", TOAST_DURATION)
+        return None
+
+def get_unique_output_path(base_output_path):
+    output_path = f"{base_output_path}.wav"
+    counter = 1
+    while os.path.exists(output_path):
+        output_path = f"{base_output_path}{counter}.wav"
+        counter += 1
+    return output_path
+
+def apply_audio_settings(input_path, output_path, audio_quality, voice_speed):
     speed_values = {"Slow": "0.75", "Normal": "1.0", "Fast": "1.25"}
     tempo = speed_values[voice_speed]
 
@@ -98,28 +165,36 @@ def show_previous_files():
 def main():
     st.set_page_config(page_title="EpisodeX", page_icon="x.png", layout="centered")
     st.title("EpisodeX")
-    st.markdown("Process and manage audio files.")
+    st.markdown("Generate speech from text using a powerful TTS model.")
 
     setup_directories()
+    load_tts_model()
 
     input_option = st.radio("Choose input option", ("Type Text", "Upload Text File"))
     prompt, char_count = get_input_text(input_option)
     st.markdown(f"**Character count: {char_count}/2000**")
     
+    language = st.selectbox("Language", list(LANGUAGE_OPTIONS.keys()), index=0)
     speaker_wav, voice_cleanup = get_voice_input()
     voice_speed = st.selectbox("Select Voice Speed", options=["Slow", "Normal", "Fast"])
     audio_quality = st.selectbox("Select Audio Quality", options=["Low", "Medium", "High"])
 
-    if st.button("Process Audio"):
-        if not speaker_wav:
-            toast("Please upload an audio file.", TOAST_DURATION)
+    if st.button("Generate Speech"):
+        if not prompt:
+            toast("Please enter some text or upload a text file.", TOAST_DURATION)
             return
         
-        cleaned_audio = clean_audio(speaker_wav, voice_cleanup)
-        output_path = os.path.join(OUTPUT_WAV_PATH, f"processed_{os.path.basename(speaker_wav)}")
-        process_audio(cleaned_audio, output_path, audio_quality, voice_speed)
-        save_transcription(prompt, output_path)
-        display_audio_output(output_path)
+        if not speaker_wav:
+            toast("Please upload a reference audio file.", TOAST_DURATION)
+            return
+        
+        audio_output = generate_speech(prompt, LANGUAGE_OPTIONS[language], speaker_wav, voice_cleanup, audio_quality, voice_speed)
+
+        if audio_output:
+            display_audio_output(audio_output)
+
+    if 'audio_output' not in locals():
+        display_temporary_waveform()
 
     show_previous_files()
 
@@ -140,7 +215,7 @@ def get_voice_input():
         speaker_wav = os.path.join(VOICE_DIR, selected_voice)
         voice_cleanup = False
     elif voice_option == "Upload Voice File":
-        voice_file = st.file_uploader("Upload voice file", type=['wav'])
+        voice_file = st.file_uploader("Upload voice file (for voice cloning)", type=['wav'])
         voice_cleanup = st.checkbox("Cleanup Reference Voice", help="Apply noise filtering to reference audio.")
         if voice_file:
             voice_data = voice_file.read()
@@ -162,7 +237,16 @@ def display_audio_output(audio_output):
         mime="audio/wav"
     )
     
-    toast(f"Audio processed and saved to {audio_output}", TOAST_DURATION)
+    st.markdown("### Waveform")
+    actual_waveform_img = plot_wf(audio_output)
+    st.markdown(f'<img src="{actual_waveform_img}" alt="Waveform" style="max-width: 100%;">', unsafe_allow_html=True)
+
+    toast(f"Speech generated and saved to {audio_output}", TOAST_DURATION)
+
+def display_temporary_waveform():
+    st.markdown("### Waveform")
+    temporary_waveform = '<svg width="800" height="200" xmlns="http://www.w3.org/2000/svg"><rect width="800" height="200" style="fill:none;" /></svg>'
+    st.markdown(f'<img src="data:image/svg+xml;base64,{base64.b64encode(temporary_waveform.encode()).decode("utf-8")}" alt="Temporary Waveform" style="max-width: 100%;">', unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
